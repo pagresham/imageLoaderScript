@@ -48,6 +48,7 @@ function bbytes_refactor_image_url( $legacy, $state, $atts, $files ) {
 	$posts_seen;
 	$return_state = array();
 	$offset;
+	$errors = array();
 
 
 	// If no $state, then first time through, make offset 0, and posts_seen 0
@@ -71,14 +72,6 @@ function bbytes_refactor_image_url( $legacy, $state, $atts, $files ) {
 		$posts_seen = $state[ 'posts_seen' ];
 	}
 
-	// write_log(array(
-	// 	"message" => "Initial Values",
-	// 	"offset" => $offset,
-	// 	'count' => $count,
-	// 	'posts_seen' => $posts_seen
-	// ));
-	
-
 
 	// get the batch of posts to process //
 	$args = array(
@@ -96,47 +89,65 @@ function bbytes_refactor_image_url( $legacy, $state, $atts, $files ) {
 		$ids = array();
 
 
+		$currentHost = $_SERVER['HTTP_HOST'];
 		foreach ($tags as $tag) {
+			$new_url;
+			$new_id;
+			$desc = "";
 
-			
 			list( $id, $url ) = get_id_and_url_from_tag( $tag ); 
 			if( $url && $id ) {
-				// do the side load, and get the new url
-				$desc = "";
-				////////
-				// $new_id = "xxxx";
-				// $new_url = "https://fakeurl.com";
+				
+				// if the url contains the url of the current site
+				if(strpos($url, $currentHost) > -1) {
+					write_log("Already have it: ". $url);
+					continue;
+				}
 				$new_id = media_sideload_image($url, $post_id, $desc, 'id');
 				$new_url = wp_get_attachment_url( $new_id );
 				
-
-
-				$attributes = $tag['attributes'];
+				// if the new_id generated an error
+				if( is_wp_error( $new_id ) ) {
+					$code = $new_id->get_error_code();
+					$error_message = $new_id->get_error_message( $code );
+					$errors[] = array(
+						'title'   => 'sideload error',
+						'message' => $error_message,
+						'post_id' => $post_id,
+					);
+				} 
 				
-				$tag['id'] = $id;
-				$tag['new_id'] = $new_id;
-				// $tag['size'] = $size;
-				$tag['new_url'] = $new_url;
-				$unique_tags[$tag['full_tag']] = $tag;
+				else {
+					
+					write_log('newurl: ' . $new_url);
+					write_log('url: ' . $url);
 
-				$content;
-				foreach( $unique_tags as $old_tag => $parsed_tag ) {
-					$new_tag = make_new_content_img_tag( $parsed_tag );
-					if( $new_tag ) {
-						$content = str_replace( $old_tag, $new_tag, $post->post_content );
-						write_log($new_tag);
-						write_log($old_tag);
+					$attributes = $tag['attributes'];
+					
+					$tag['id'] = $id;
+					$tag['new_id'] = $new_id;
+					// $tag['size'] = $size;
+					$tag['new_url'] = $new_url;
+					$unique_tags[$tag['full_tag']] = $tag;
+
+					$content;
+					foreach( $unique_tags as $old_tag => $parsed_tag ) {
+						$new_tag = make_new_content_img_tag( $parsed_tag );
+						if( $new_tag ) {
+							$content = str_replace( $old_tag, $new_tag, $post->post_content );
+							write_log($new_tag);
+							write_log($old_tag);
+						}
 					}
-				}
 
-				// write_log($new_content);
-				$my_post = array(
-					'ID'           => $post_id,
-			        'post_content' => $content,
-				);
-				if( $content ) {
-					//////
-					wp_update_post( $my_post );	
+					// write_log($new_content);
+					$my_post = array(
+						'ID'           => $post_id,
+				        'post_content' => $content,
+					);
+					if( $content ) {
+						wp_update_post( $my_post );	
+					}
 				}
 			}
 		}
@@ -169,11 +180,16 @@ function bbytes_refactor_image_url( $legacy, $state, $atts, $files ) {
 		);
 	}
 	
+	$message;
+	if( count($errors) ) 
+		$message = "Oh Snap!\nErrors Were:\n" . json_encode( $errors );
+	else 
+		$message = "HELLO WORLD!\nAtts Were:\n" . json_encode( $return_state );
+	
+
 	return array(
-		// 'state'   => 'complete',
 		'state'   => $return_state,
-		// 'message' => "HELLO WORLD!\nAtts Were:\n" . json_encode( $atts ),
-		'message' => "HELLO WORLD!\nAtts Were:\n" . json_encode( $return_state ),
+		'message' => $message,
 	);
 }
 add_filter('wp_util_script', 'bbytes_refactor_image_url', 10, 4);
@@ -295,7 +311,7 @@ function get_id_and_url_from_tag( $tag ) {
 		$ret_val[1] = $url;
 	
 	}
-	write_log($ret_val);
+	// write_log($ret_val);
 	return $ret_val;
 }
 
@@ -324,16 +340,16 @@ function make_new_content_img_tag( $tag ) {
 
 		$new_url = $tag['new_url']; 
 		$atts['src'] = $new_url;
+		// make sure new_id is a thing
 		$new_id = $tag['new_id'];
 		$id_prefix = 'wp-image-';
 		
-		// $new_class = preg_replace('/wp-image-[0-9]{4,}\b/', $id_prefix . $new_id, $atts['class']); 
-		
-		$atts['class'] = preg_replace('/wp-image-[0-9]{4,}\b/', $id_prefix . $new_id, $atts['class']); 
-		
-		if( $new_class ) {
-			$atts['class'] = $new_class;	
-		}
+		// remove old wp-img class
+		$atts['class'] = preg_replace('/wp-image-\d+/', "", $atts['class']); 
+		// add new class back on 
+		$atts['class'] .= " " . $id_prefix . $new_id;
+		// get rid of extra spaces
+		$atts['class'] = trim( preg_replace("/\s+/", " ", $atts['class']) );
 
 		// $size = $tag['size'];
 		// write_log($atts['src']);
